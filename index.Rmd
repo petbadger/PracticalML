@@ -1,0 +1,194 @@
+---
+title: "Prediction Assignment for Practical Machine Learning Coursera"
+author: "Jared Prins"
+date: "May 7, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libs, echo=TRUE, results='hide'}
+library(caret)
+library(parallel)#base package
+library(doParallel)
+```
+
+
+## Introduction
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. This project uses data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to build a predictive model that, when applied to new data, can predict whether an exercise is performed well or not.
+
+### Project Goal
+Goal: Predict the Classe variable in the following way:
+
+1. describe how you built your model
+2. describe how you used cross validation
+3. describe what you think the expected out of sample error is
+4. describe why you made the choices you did
+5. use your prediction model to predict 20 different test cases
+
+
+## Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. This project uses data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants who were asked to perform barbell lifts correctly and incorrectly in 5 different ways. 
+
+
+## About the Data
+
+The training data for this project are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (Specifically see the section on the Weight Lifting Exercise Dataset).
+
+
+```{r data, echo=TRUE}
+data.train <- readRDS("data/data.train")
+data.new <- readRDS("data/data.new")
+```
+
+```{r names, echo=TRUE, results='hide'}
+names(data.train)
+print(object.size(data.train), units='auto')
+```
+
+The training data consists of `r dim(data.train)[1]` observations and `r dim(data.train)[2]` features. 
+
+_About the Classe variable:_
+Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes.
+
+
+## Note on Reproducibility
+All code is available via GitHub.  A seed of "123"" was used for all sampling functions in R.
+A saved version of the champion model is saved as "rf_model.rda".  Packages and versions can be viewed in "session_info.rda".  
+
+The size of this training data is ~5.2MB. Although it's not overly large, the amount of variables could pose size limitations for some computers when creating the models.
+
+
+## Cleaning the data and Variable Selection
+Since the training data has many features, variable reduction is necessary. It will also help to reduce noise and create a more robust model. The following are removed:
+
+1. Meaningless features
+2. Features with many missing values
+3. Redundant features
+4. Near Zero Variance features
+
+The following meaningless features are removed from analysis, as they have no bearing on the classe outcome:
+"X1", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "num_window", "new_window", "user_name"
+
+Many of the features have significant amounts of NA values which should also be removed.
+Transposing the data frame twice and using na.omit is a handy trick to remove these features. 
+
+A correlation matrix suggests the variables with "total" in the name are redundant. These are also removed from the analysis. Intuitively, these "total" variables are "washed out" representations of the variables that comprise them.
+
+Features with near zero variance add nothing to the prediction function. Caret's nearZeroVar function shows that there are no longer any such features in the training data.
+
+
+```{r clean, echo=TRUE, results='hide'}
+#Exclude meaningless features
+exclude <- c("X1", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "num_window", "new_window", "user_name")
+data.train <- data.train[ , !names(data.train) %in% exclude]
+
+#Exclude features with missing values 
+  #Transpose twice to remove columns with lots of NA
+keep <- names(as.data.frame( t(na.omit(t(data.train))) ) )#get list of vars that are not full of NA's
+data.train <- data.train[ , names(data.train) %in% keep]
+
+#Exclude redundant features
+cor(data.train[ , !names(data.train) %in% c("classe")]) 
+totals_vars <- names( data.train[ , grepl( "total" , names(data.train) )] )
+data.train <- data.train[ , !names(data.train) %in% totals_vars]
+
+#Exclude any Near Zero Variance features
+nearZeroVar(data.train) #returns none
+```
+
+
+Lastly, it is prudent to set the outcome variable as a factor.  With this final step, the cleaned training data now consists of `r dim(data.train)[1]` observations and `r dim(data.train)[2]` features. 
+
+```{r factorize, echo=TRUE}
+data.train$classe <- factor(data.train$classe) 
+```
+
+## Model Building
+Two models are attempted and their accuracies are compared.  The model with the highest accuracy will be the champion model.  This champion model will be applied to new data.
+
+The first is a Decision Tree classification model and the second is a Random Forest model. Both are from the caret package. Due to RAM limitations, there are some optimizations required to create the Random Forest.
+
+### Cross Validation
+Cross Validation involving the sampling a training set and testing (hold out) set is used since it is fast and computationally light for systems with limited RAM.  75% of the training data will be used for training while the remaining 25% will be used for testing.
+
+Both models will be fit on the training subsample and their accuracies compared using the testing subsamples.  
+
+### Expected out-of-sample error rate
+The out-of-sample error rate is calculated as 1 - Accuracy.  This is also referred to as the Generalization Error, which alludes to its meaning. Generalization is how accurate the algorithm is able to predict the outcome for new data.  Since the model is trained on such a high number of observations, it is expected that the accuracy will be high and the generalization error will be minimized.
+
+
+##Model 1 - Decision Tree
+```{r model1, echo=TRUE}
+#Model building
+set.seed(123)
+inTrain <- createDataPartition(y=data.train$classe, p=0.75, list=FALSE)
+training <- data.train[inTrain, ]
+testing <- data.train[-inTrain, ]
+
+mod1 <- train(classe ~. , method="rpart", data=data.train)
+pred1 <- predict(mod1, testing)
+confusionMatrix(pred1, testing$classe)
+
+```
+
+The Decision Tree model has an accuracy of `r confusionMatrix(pred1, testing$classe)$overall["Accuracy"]`. The out-of-sample error rate is `r 1-confusionMatrix(pred1, testing$classe)$overall["Accuracy"]`.  The confidence intervals for the decission tree model is CI(`r confusionMatrix(pred1, testing$classe)$overall["AccuracyLower"]` , `r confusionMatrix(pred1, testing$classe)$overall["AccuracyUpper"]`) 
+
+
+##Model 2 - Random Forest
+
+```{r model2, echo=TRUE}
+
+#The code below is for the Random Forest Model.
+ # Need to do parrellel processing, due to limited RAM
+ # Uncomment if want to rebuild the model
+ # Or just load the saved model object
+
+ #x <- training[, -46]
+ #y <- training[, 46]
+ #cluster <- makeCluster(detectCores() - 1) #leave 1 core for OS
+ #registerDoParallel(cluster)
+ #fitControl <- trainControl(method = "cv",
+ #                           number = 10,
+ #                           allowParallel = TRUE)
+ # mod2 <- train(x,y=make.names(training$classe), method="rf", data=data.train, trControl =  fitControl)
+
+#load model called mod2
+load("rf_model.rda")
+
+pred2 <- predict(mod2, testing)
+confusionMatrix(pred2, testing$classe)
+
+```
+
+
+The Random Forest has a model accuracy of `r confusionMatrix(pred2, testing$classe)$overall["Accuracy"]`.  __The champion model is the Random Forest model__. The out-of-sample error rate is `r 1-confusionMatrix(pred2, testing$classe)$overall["Accuracy"]`.  The confidence intervals for random forest model is CI(`r confusionMatrix(pred2, testing$classe)$overall["AccuracyLower"]` , `r confusionMatrix(pred2, testing$classe)$overall["AccuracyUpper"]`)
+
+
+
+##Submission - Predict with new data
+The Random Forst model can be applied against new data. It can be shown how many of each class has been predicted. 
+```{r predict, echo=TRUE}
+predict.new <- predict(mod2, newdata = data.new)
+table(predict.new)
+```
+
+The supplied new data set of 20 observations results in this prediction:
+`r predict.new`
+
+### Word Count
+Estimated word count for this document: ~1640.
+
+### References
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. 

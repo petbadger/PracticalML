@@ -63,7 +63,7 @@ inTrain <- createDataPartition(y=data.train$classe, p=0.75, list=FALSE)
 training <- data.train[inTrain, ]
 testing <- data.train[-inTrain, ]
 
-mod1 <- train(classe ~. , method="rpart", data=data.train)
+mod1 <- train(classe ~. , method="rpart", data=training)
 
 
 #The code below is for the Random Forest Model.
